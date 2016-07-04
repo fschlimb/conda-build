@@ -160,7 +160,7 @@ def msvc_env_cmd(bits, override=None):
         # Visual Studio 14 or otherwise
         msvc_env_lines.append(build_vcvarsall_cmd(vcvarsall_vs_path))
 
-    return '\n'.join(msvc_env_lines)
+    return '\n'.join(msvc_env_lines) + '\n'
 
 
 def kill_processes(process_names=["msbuild.exe"]):
@@ -186,10 +186,8 @@ def kill_processes(process_names=["msbuild.exe"]):
             continue
 
 
-def build(m, bld_bat, dirty=False):
-    env = dict(os.environ)
-    env.update(environ.get_dict(m, dirty=dirty))
-    env = environ.prepend_bin_path(env, config.build_prefix, True)
+def build(m, bld_bat, dirty=False, activate=True):
+    env = environ.get_dict(m, dirty=dirty)
 
     for name in 'BIN', 'INC', 'LIB':
         path = env['LIBRARY_' + name]
@@ -208,6 +206,8 @@ def build(m, bld_bat, dirty=False):
             fo.write("set INCLUDE={};%INCLUDE%\n".format(env["LIBRARY_INC"]))
             fo.write("set LIB={};%LIB%\n".format(env["LIBRARY_LIB"]))
             fo.write(msvc_env_cmd(bits=cc.bits, override=m.get_value('build/msvc_compiler', None)))
+            if activate:
+                fo.write("call activate _build\n")
             fo.write('\n')
             fo.write("REM ===== end generated header =====\n")
             fo.write(data)

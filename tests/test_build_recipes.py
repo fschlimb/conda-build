@@ -23,33 +23,14 @@ def is_valid_dir(parent_dir, dirname):
     return valid
 
 
-@pytest.mark.skipif(sys.platform != "win32",
-                    reason="Problem only observed on Windows with win7 sdk")
-def test_header_finding():
-    """
-    Windows sometimes very strangely cannot find headers in %LIBRARY_INC%.  This has so far
-    only been a problem with the recipes that use the Win 7 SDK (python 3.4 builds)
-    """
-    cmd = 'conda build --no-anaconda-upload {}/_pyyaml_find_header'.format(metadata_dir)
-    try:
-        output = subprocess.check_output(cmd.split())
-    except subprocess.CalledProcessError as error:
-        print(error.output)
-        print(os.listdir(os.path.join(sys.prefix, "envs", "_build", "Library", "include")))
-        raise
-    if PY3:
-        output = output.decode("UTF-8")
-    assert "forcing --without-libyaml" not in output
-
-
-def test_CONDA_BLD_PATH():
-    env = dict(os.environ)
-    cmd = 'conda build --no-anaconda-upload {}/source_git_jinja2'.format(metadata_dir)
-    with TemporaryDirectory() as tmp:
-        env["CONDA_BLD_PATH"] = tmp
-        subprocess.check_call(cmd.split(), env=env)
-        # trick is actually a second pass, to make sure that deletion/trash moving is working OK.
-        subprocess.check_call(cmd.split(), env=env)
+# def test_CONDA_BLD_PATH():
+#     env = dict(os.environ)
+#     cmd = 'conda build --no-anaconda-upload {}/source_git_jinja2'.format(metadata_dir)
+#     with TemporaryDirectory() as tmp:
+#         env["CONDA_BLD_PATH"] = tmp
+#         subprocess.check_call(cmd.split(), env=env)
+#         # trick is actually a second pass, to make sure that deletion/trash moving is working OK.
+#         subprocess.check_call(cmd.split(), env=env)
 
 
 # TODO: this does not currently take into account post-build versioning changes with __conda_? files
@@ -63,7 +44,15 @@ def test_output_build_path_git_source():
                                       sys.version_info.major, sys.version_info.minor))
     if PY3:
         output = output.decode("UTF-8")
-    assert output.rstrip() == test_path
+        error = error.decode("UTF-8")
+    assert output.rstrip() == test_path, error
+
+
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="no binary prefix manipulation done on windows.")
+def test_binary_has_prefix_files():
+    cmd = 'conda build --no-anaconda-upload {}/_binary_has_prefix_files'.format(metadata_dir)
+    subprocess.check_call(cmd.split())
 
 
 @pytest.mark.skipif(sys.platform == "win32",
@@ -95,6 +84,8 @@ def test_cached_source_not_interfere_with_versioning():
             if PY3:
                 output = output.decode("UTF-8")
             assert ("conda-build-test-source-git-jinja2-1.20.0" in output)
+    except:
+        raise
     finally:
         os.chdir(basedir)
 
@@ -278,6 +269,26 @@ def test_token_upload():
     cmd = 'anaconda --token {} remove --force conda_test_account/conda-build-test-empty_sections'\
     .format(token)
     subprocess.check_call(cmd.split())
+
+
+@pytest.mark.parametrize("service_name", ["binstar", "anaconda"])
+def test_no_anaconda_upload_condarc(service_name):
+    with TemporaryDirectory() as tmp:
+        rcfile = os.path.join(tmp, ".condarc")
+        with open(rcfile, 'w') as f:
+            f.write("{}_upload: False\n".format(service_name))
+        env = os.environ.copy()
+        env["CONDARC"] = rcfile
+        cmd = "conda build {}/empty_sections".format(metadata_dir)
+        process = subprocess.Popen(cmd.split(),
+                                   stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE,
+                                   env=env)
+        output, error = process.communicate()
+        output = output.decode('utf-8')
+        error = error.decode('utf-8')
+        sys.stderr.write(output)
+        assert "Automatic uploading is disabled" in output, error
 
 
 def test_patch_strip_level():

@@ -22,7 +22,7 @@ import conda.plan as plan
 from conda.api import get_index
 from conda.compat import PY3
 from conda.fetch import fetch_index
-from conda.install import prefix_placeholder, linked, move_to_trash
+from conda.install import prefix_placeholder, linked, move_to_trash, symlink_conda
 from conda.lock import Locked
 from conda.utils import url_path
 from conda.resolve import Resolve, MatchSpec, NoPackagesFound
@@ -74,13 +74,13 @@ def create_post_scripts(m):
     Create scripts to run after build step
     '''
     recipe_dir = m.path
-    ext = '.bat' if sys.platform == 'win32' else '.sh'
+    ext = '.bat' if on_win else '.sh'
     for tp in 'pre-link', 'post-link', 'pre-unlink':
         src = join(recipe_dir, tp + ext)
         if not isfile(src):
             continue
         dst_dir = join(config.build_prefix,
-                       'Scripts' if sys.platform == 'win32' else 'bin')
+                       'Scripts' if on_win else 'bin')
         if not isdir(dst_dir):
             os.makedirs(dst_dir, int('755', 8))
         dst = join(dst_dir, '.%s-%s%s' % (m.name(), tp, ext))
@@ -125,7 +125,7 @@ def have_prefix_files(files):
 
         mode = 'binary' if mm.find(b'\x00') != -1 else 'text'
         if mode == 'text':
-            if sys.platform != 'win32' and mm.find(prefix_bytes) != -1:
+            if not on_win and mm.find(prefix_bytes) != -1:
                 # Use the placeholder for maximal backwards compatibility, and
                 # to minimize the occurrences of usernames appearing in built
                 # packages.
@@ -251,11 +251,7 @@ def create_info_files(m, files, include_recipe=True):
                 d[key] = value
         json.dump(d, fo, indent=2, sort_keys=True)
 
-    if include_recipe:
-        with open(join(config.info_dir, 'recipe.json'), **mode_dict) as fo:
-            json.dump(m.meta, fo, indent=2, sort_keys=True)
-
-    if sys.platform == 'win32':
+    if on_win:
         # make sure we use '/' path separators in metadata
         files = [_f.replace('\\', '/') for _f in files]
 
@@ -282,7 +278,7 @@ def create_info_files(m, files, include_recipe=True):
 
     if files_with_prefix and not m.get_value('build/noarch_python'):
         auto_detect = m.get_value('build/detect_binary_files_with_prefix')
-        if sys.platform == 'win32':
+        if on_win:
             # Paths on Windows can contain spaces, so we need to quote the
             # paths. Fortunately they can't contain quotes, so we don't have
             # to worry about nested quotes.
@@ -369,6 +365,11 @@ def create_env(prefix, specs, clear_cache=True):
     # ensure prefix exists, even if empty, i.e. when specs are empty
     if not isdir(prefix):
         os.makedirs(prefix)
+    if on_win:
+        shell = "cmd.exe"
+    else:
+        shell = "bash"
+    symlink_conda(prefix, sys.prefix, shell)
 
 
 def warn_on_old_conda_build(index):
@@ -406,7 +407,8 @@ def rm_pkgs_cache(dist):
 
 
 def build(m, post=None, include_recipe=True, keep_old_work=False,
-          need_source_download=True, verbose=True, dirty=False):
+          need_source_download=True, verbose=True, dirty=False,
+          activate=True):
     '''
     Build the package with the specified metadata.
 
@@ -470,18 +472,12 @@ def build(m, post=None, include_recipe=True, keep_old_work=False,
                 # Execute any commands fetching the source (e.g., git) in the _build environment.
                 # This makes it possible to provide source fetchers (eg. git, hg, svn) as build
                 # dependencies.
-                _old_path = os.environ['PATH']
-                try:
-                    os.environ['PATH'] = prepend_bin_path({'PATH': _old_path},
-                                                            config.build_prefix)['PATH']
-                    m, need_source_download = parse_or_try_download(m,
-                                                                    no_download_source=False,
-                                                                    force_download=True,
-                                                                    verbose=verbose,
-                                                                    dirty=dirty)
-                    assert not need_source_download, "Source download failed.  Please investigate."
-                finally:
-                    os.environ['PATH'] = _old_path
+                m, need_source_download = parse_or_try_download(m,
+                                                                no_download_source=False,
+                                                                force_download=True,
+                                                                verbose=verbose,
+                                                                dirty=dirty)
+                assert not need_source_download, "Source download failed.  Please investigate."
 
             if m.name() in [i.rsplit('-', 2)[0] for i in linked(config.build_prefix)]:
                 print("%s is installed as a build dependency. Removing." %
@@ -525,28 +521,42 @@ def build(m, post=None, include_recipe=True, keep_old_work=False,
                 if isinstance(script, list):
                     script = '\n'.join(script)
 
-            if sys.platform == 'win32':
+            if on_win:
                 build_file = join(m.path, 'bld.bat')
                 if script:
                     build_file = join(source.get_dir(), 'bld.bat')
                     with open(join(source.get_dir(), 'bld.bat'), 'w') as bf:
                         bf.write(script)
                 import conda_build.windows as windows
-                windows.build(m, build_file, dirty=dirty)
+                windows.build(m, build_file, dirty=dirty, activate=activate)
             else:
-                env = environ.get_dict(m, dirty=dirty)
                 build_file = join(m.path, 'build.sh')
 
-                if script:
-                    build_file = join(source.get_dir(), 'conda_build.sh')
-                    with open(build_file, 'w') as bf:
-                        bf.write(script)
-                    os.chmod(build_file, 0o766)
+                # There is no sense in trying to run an empty build script.
+                if isfile(build_file) or script:
+                    env = environ.get_dict(m, dirty=dirty)
+                    work_file = join(source.get_dir(), 'conda_build.sh')
+                    if script:
+                        with open(work_file, 'w') as bf:
+                            bf.write(script)
+                    if activate:
+                        if isfile(build_file):
+                            data = open(build_file).read()
+                        else:
+                            data = open(work_file).read()
+                        with open(work_file, 'w') as bf:
+                            bf.write("source activate {build_prefix}\n".format(
+                                build_prefix=config.build_prefix))
+                            bf.write(data)
+                    else:
+                        if not isfile(work_file):
+                            shutil.copy(build_file, work_file)
+                    os.chmod(work_file, 0o766)
 
-                if isfile(build_file):
-                    cmd = [shell_path, '-x', '-e', build_file]
+                    if isfile(work_file):
+                        cmd = [shell_path, '-x', '-e', work_file]
 
-                    _check_call(cmd, env=env, cwd=src_dir)
+                        _check_call(cmd, env=env, cwd=src_dir)
 
         if post in [True, None]:
             if post:
@@ -566,8 +576,8 @@ def build(m, post=None, include_recipe=True, keep_old_work=False,
             files2 = prefix_files()
             if any(config.meta_dir in join(config.build_prefix, f) for f in
                     files2 - files1):
-                sys.exit(indent("""Error: Untracked file(s) %s found in conda-meta directory.  This error
-    usually comes from using conda in the build script.  Avoid doing this, as it
+                sys.exit(indent("""Error: Untracked file(s) %s found in conda-meta directory.
+    This error usually comes from using conda in the build script.  Avoid doing this, as it
     can lead to packages that include their dependencies.""" %
                     (tuple(f for f in files2 - files1 if config.meta_dir in
                         join(config.build_prefix, f)),)))
@@ -618,7 +628,7 @@ def build(m, post=None, include_recipe=True, keep_old_work=False,
             shutil.rmtree(old_WORK_DIR, ignore_errors=True)
 
 
-def test(m, move_broken=True):
+def test(m, move_broken=True, activate=True):
     '''
     Execute any test scripts for the given package.
 
@@ -685,57 +695,56 @@ def test(m, move_broken=True):
         env = dict(os.environ)
         env.update(environ.get_dict(m, prefix=config.test_prefix))
 
-        # prepend bin (or Scripts) directory
-        env = prepend_bin_path(env, config.test_prefix, prepend_prefix=True)
+        if not activate:
+            # prepend bin (or Scripts) directory
+            env = prepend_bin_path(env, config.test_prefix, prepend_prefix=True)
 
-        if sys.platform == 'win32':
-            env['PATH'] = config.test_prefix + os.pathsep + env['PATH']
+            if on_win:
+                env['PATH'] = config.test_prefix + os.pathsep + env['PATH']
+
         for varname in 'CONDA_PY', 'CONDA_NPY', 'CONDA_PERL', 'CONDA_LUA':
             env[varname] = str(getattr(config, varname) or '')
         env['PREFIX'] = config.test_prefix
 
         # Python 2 Windows requires that envs variables be string, not unicode
         env = {str(key): str(value) for key, value in env.items()}
-        if py_files:
-            try:
-                subprocess.check_call([config.test_python, '-s',
-                                    join(tmp_dir, 'run_test.py')],
-                                    env=env, cwd=tmp_dir)
-            except subprocess.CalledProcessError:
-                tests_failed(m, move_broken=move_broken)
+        suffix = "bat" if on_win else "sh"
+        test_script = join(tmp_dir, "conda_test_runner.{suffix}".format(suffix=suffix))
 
-        if pl_files:
-            try:
-                subprocess.check_call([config.test_perl,
-                                    join(tmp_dir, 'run_test.pl')],
-                                    env=env, cwd=tmp_dir)
-            except subprocess.CalledProcessError:
-                tests_failed(m, move_broken=move_broken)
+        with open(test_script, 'w') as tf:
+            if activate:
+                tf.write("{source}activate _test\n".format(source="" if on_win else "source "))
+            if py_files:
+                tf.write("{python} -s {test_file}\n".format(
+                    python=config.test_python,
+                    test_file=join(tmp_dir, 'run_test.py')))
 
-        if lua_files:
-            try:
-                subprocess.check_call([config.test_lua,
-                                    join(tmp_dir, 'run_test.lua')],
-                                    env=env, cwd=tmp_dir)
-            except subprocess.CalledProcessError:
-                tests_failed(m)
+            if pl_files:
+                tf.write("{perl} {test_file}\n".format(
+                    python=config.test_perl,
+                    test_file=join(tmp_dir, 'run_test.pl')))
 
-        if shell_files:
-            if sys.platform == 'win32':
-                test_file = join(tmp_dir, 'run_test.bat')
-                cmd = [os.environ['COMSPEC'], '/c', 'call', test_file]
-                try:
-                    subprocess.check_call(cmd, env=env, cwd=tmp_dir)
-                except subprocess.CalledProcessError:
-                    tests_failed(m, move_broken=move_broken)
-            else:
-                test_file = join(tmp_dir, 'run_test.sh')
-                # TODO: Run the test/commands here instead of in run_test.py
-                cmd = [shell_path, '-x', '-e', test_file]
-                try:
-                    subprocess.check_call(cmd, env=env, cwd=tmp_dir)
-                except subprocess.CalledProcessError:
-                    tests_failed(m, move_broken=move_broken)
+            if lua_files:
+                tf.write("{lua} {test_file}\n".format(
+                    python=config.test_perl,
+                    test_file=join(tmp_dir, 'run_test.lua')))
+
+            if shell_files:
+                test_file = join(tmp_dir, 'run_test.' + suffix)
+                if on_win:
+                    tf.write("call {test_file}\n".format(test_file=test_file))
+                else:
+                    # TODO: Run the test/commands here instead of in run_test.py
+                    tf.write("{shell_path} -x -e {test_file}\n".format(shell_path=shell_path,
+                                                                       test_file=test_file))
+        if on_win:
+            cmd = [env["COMSPEC"], "/d", "/c", test_script]
+        else:
+            cmd = [shell_path, '-x', '-e', test_script]
+        try:
+            subprocess.check_call(cmd, env=env, cwd=tmp_dir)
+        except subprocess.CalledProcessError:
+            tests_failed(m, move_broken=move_broken)
 
     print("TEST END:", m.dist())
 

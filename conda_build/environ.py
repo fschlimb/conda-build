@@ -7,13 +7,15 @@ import sys
 import warnings
 from collections import defaultdict
 from os.path import join, normpath
-from subprocess import STDOUT, check_output, CalledProcessError, Popen, PIPE
+import subprocess
 
 import conda.config as cc
-from conda.compat import text_type
+# noqa here because PY3 is used only on windows, and trips up flake8 otherwise.
+from conda.compat import text_type, PY3  # noqa
 
 from conda_build import external
 from conda_build import source
+from conda_build import utils
 from conda_build.config import config
 from conda_build.features import feature_list
 from conda_build.scripts import prepend_bin_path
@@ -63,12 +65,12 @@ def verify_git_repo(git_dir, git_url, expected_rev='HEAD'):
     env['GIT_DIR'] = git_dir
     try:
         # Verify current commit matches expected commit
-        current_commit = check_output(["git", "log", "-n1", "--format=%H"],
-                                      env=env, stderr=STDOUT)
+        current_commit = subprocess.check_output(["git", "log", "-n1", "--format=%H"],
+                                      env=env, stderr=subprocess.STDOUT)
         current_commit = current_commit.decode('utf-8')
-        expected_tag_commit = check_output(["git", "log", "-n1", "--format=%H",
+        expected_tag_commit = subprocess.check_output(["git", "log", "-n1", "--format=%H",
                                             expected_rev],
-                                           env=env, stderr=STDOUT)
+                                           env=env, stderr=subprocess.STDOUT)
         expected_tag_commit = expected_tag_commit.decode('utf-8')
 
         if current_commit != expected_tag_commit:
@@ -76,8 +78,8 @@ def verify_git_repo(git_dir, git_url, expected_rev='HEAD'):
 
         # Verify correct remote url. Need to find the git cache directory,
         # and check the remote from there.
-        cache_details = check_output(["git", "remote", "-v"], env=env,
-                                     stderr=STDOUT)
+        cache_details = subprocess.check_output(["git", "remote", "-v"], env=env,
+                                     stderr=subprocess.STDOUT)
         cache_details = cache_details.decode('utf-8')
         cache_dir = cache_details.split('\n')[0].split()[1]
 
@@ -85,15 +87,15 @@ def verify_git_repo(git_dir, git_url, expected_rev='HEAD'):
             # On Windows, subprocess env can't handle unicode.
             cache_dir = cache_dir.encode(sys.getfilesystemencoding() or 'utf-8')
 
-        remote_details = check_output(["git", "--git-dir", cache_dir, "remote", "-v"], env=env,
-                                                 stderr=STDOUT)
+        remote_details = subprocess.check_output(["git", "--git-dir", cache_dir, "remote", "-v"],
+                                                 env=env, stderr=subprocess.STDOUT)
         remote_details = remote_details.decode('utf-8')
         remote_url = remote_details.split('\n')[0].split()[1]
 
         # on windows, remote URL comes back to us as cygwin or msys format.  Python doesn't
         # know how to normalize it.  Need to convert it to a windows path.
         if sys.platform == 'win32' and remote_url.startswith('/'):
-            remote_url = check_output(["cygpath", '-w', remote_url]).rstrip().rstrip("\\")
+            remote_url = utils.convert_unix_path_to_win(git_url)
 
         if os.path.exists(remote_url):
             # Local filepaths are allowed, but make sure we normalize them
@@ -106,7 +108,7 @@ def verify_git_repo(git_dir, git_url, expected_rev='HEAD'):
             logging.debug("Remote: " + remote_url.lower() + "\n")
             logging.debug("git_url: " + git_url.lower() + "\n")
             return False
-    except CalledProcessError as error:
+    except subprocess.CalledProcessError as error:
         logging.warn("Error obtaining git information.  Error was: ")
         logging.warn(error)
         return False
@@ -131,8 +133,8 @@ def get_git_info(repo):
     env['GIT_DIR'] = repo
     keys = ["GIT_DESCRIBE_TAG", "GIT_DESCRIBE_NUMBER", "GIT_DESCRIBE_HASH"]
 
-    process = Popen(["git", "describe", "--tags", "--long", "HEAD"],
-                    stdout=PIPE, stderr=PIPE,
+    process = subprocess.Popen(["git", "describe", "--tags", "--long", "HEAD"],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                     env=env)
     output = process.communicate()[0].strip()
     output = output.decode('utf-8')
@@ -142,8 +144,8 @@ def get_git_info(repo):
         d.update(dict(zip(keys, parts)))
 
     # get the _full_ hash of the current HEAD
-    process = Popen(["git", "rev-parse", "HEAD"],
-                    stdout=PIPE, stderr=PIPE, env=env)
+    process = subprocess.Popen(["git", "rev-parse", "HEAD"],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
     output = process.communicate()[0].strip()
     output = output.decode('utf-8')
 
@@ -254,6 +256,8 @@ def meta_vars(meta):
         git_url = meta.get_value('source/git_url')
 
         if os.path.exists(git_url):
+            if sys.platform == 'win32':
+                git_url = utils.convert_unix_path_to_win(git_url)
             # If git_url is a relative path instead of a url, convert it to an abspath
             git_url = normpath(join(meta.path, git_url))
 
@@ -279,8 +283,8 @@ def get_cpu_count():
     if sys.platform == "darwin":
         # multiprocessing.cpu_count() is not reliable on OSX
         # See issue #645 on github.com/conda/conda-build
-        out, err = Popen('sysctl -n hw.logicalcpu', shell=True,
-                         stdout=PIPE).communicate()
+        out, err = subprocess.Popen('sysctl -n hw.logicalcpu', shell=True,
+                         stdout=subprocess.PIPE).communicate()
         return out.decode('utf-8').strip()
     else:
         try:
